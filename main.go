@@ -1,18 +1,18 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"github.com/PuerkitoBio/goquery"
+	"io"
+	"io/ioutil"
+	"log"
+	"math/rand"
 	"net/http"
 	qhy_url "net/url"
-	"fmt"
-	"math/rand"
-	"time"
-	"io"
-	"github.com/PuerkitoBio/goquery"
-	"log"
-	"strings"
-	"io/ioutil"
-	"encoding/json"
 	"os"
+	"strings"
+	"time"
 )
 
 //随拾爬虫
@@ -30,24 +30,28 @@ var (
 )
 
 type Category struct {
-	name 		string
+	name string
 
-	DataId      string
+	DataId string
 }
 
 //爬虫的目标结果
 type TagResult struct {
-	Category 	string
+	Category string
 
-	Title 		string
+	Title string
 
-	Desc 		string
+	Desc string
 
-	ImgUrl 		string
+	ImgUrl string
+
+	Target string
 }
 
 //伪造User-Agent
-var userAgent = [...]string{"Mozilla/5.0 (compatible, MSIE 10.0, Windows NT, DigExt)",
+var userAgent = [...]string{
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/68.0.3440.106 Safari/537.36",
+	"Mozilla/5.0 (compatible, MSIE 10.0, Windows NT, DigExt)",
 	"Mozilla/4.0 (compatible, MSIE 7.0, Windows NT 5.1, 360SE)",
 	"Mozilla/4.0 (compatible, MSIE 8.0, Windows NT 6.0, Trident/4.0)",
 	"Mozilla/5.0 (compatible, MSIE 9.0, Windows NT 6.1, Trident/5.0,",
@@ -63,8 +67,31 @@ var userAgent = [...]string{"Mozilla/5.0 (compatible, MSIE 10.0, Windows NT, Dig
 	"MQQBrowser/26 Mozilla/5.0 (Linux, U, Android 2.3.7, zh-cn, MB200 Build/GRJ22, CyanogenMod-7) AppleWebKit/533.1 (KHTML, like Gecko) Version/4.0 Mobile Safari/533.1"}
 
 var r = rand.New(rand.NewSource(time.Now().UnixNano()))
+
 func GetRandomUserAgent() string {
 	return userAgent[r.Intn(len(userAgent))]
+}
+
+//io.ReadCloser，不需要时，需要关闭
+//defer body.Close()
+//使用chrome User-Agent爬取
+func Worm2(url string) (io.ReadCloser, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("页面访问出错 ", err)
+	}
+	req.Header.Set("User-Agent", userAgent[0])
+
+	client := &http.Client{}
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("Get请求%s返回错误:%s", url, err)
+	}
+	if res.StatusCode == 200 {
+		body := res.Body
+		return body, nil
+	}
+	return nil, fmt.Errorf("网页不存在")
 }
 
 //爬取
@@ -87,6 +114,53 @@ func Worm(url string) (io.ReadCloser, error) {
 		return body, nil
 	}
 	return nil, fmt.Errorf("网页不存在")
+}
+
+//抓取小分类的详细描述
+func WormCategoryDesc(target string) (string, string, error) {
+	var result string
+	var targetNumber string
+
+	url := "https://www.zhihu.com" + target
+	body, err := Worm2(url)
+	if err != nil {
+		return result,targetNumber, err
+	}
+
+	//目标编号
+	splits := strings.Split(target, "/")
+	targetNumber = splits[2]
+
+	doc, err := goquery.NewDocumentFromReader(body)
+	if err != nil {
+		return result, targetNumber, err
+	}
+
+	//fmt.Println(doc.Selection.Text())
+	data, ok := doc.Find("div#data").Attr("data-state")
+	if ok {
+		var dt map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &dt); err != nil {
+			return result, targetNumber,  err
+		}
+
+		if web, ok := dt["entities"]; ok {
+			entities := web.(map[string]interface{})
+			if topic, ok := entities["topics"]; ok {
+				topic := topic.(map[string]interface{})
+				if tag, ok := topic[targetNumber]; ok {
+					tag := tag.(map[string]interface{})
+					if intr, ok := tag["introduction"]; ok {
+						result = intr.(string)
+					}
+				}
+
+			}
+		}
+
+	}
+
+	return result,targetNumber,  err
 }
 
 //处理
@@ -113,13 +187,14 @@ func WormJob(category Category, done chan<- bool) error {
 		return err
 	}
 
-	doc.Find("div.item").Each(func(i int,s *goquery.Selection) {
-		s.Children().Each(func(j int,ss *goquery.Selection) {
+	doc.Find("div.item").Each(func(i int, s *goquery.Selection) {
+		fmt.Println(s.Text())
+		s.Children().Each(func(j int, ss *goquery.Selection) {
 			result := TagResult{}
 
 			imgUrl, ok := ss.Find("img").Attr("src")
 			if ok {
-			//	fmt.Println("img_url=", imgUrl)
+				//	fmt.Println("img_url=", imgUrl)
 				result.ImgUrl = imgUrl
 			}
 
@@ -129,13 +204,13 @@ func WormJob(category Category, done chan<- bool) error {
 				result.Title = title
 			}
 
-			desc := ss.Find("p").Text()
-			if len(desc) > 0 {
-				//fmt.Println("desc=", desc)
+			href, ok := ss.Find("a").Attr("href")
+			if ok {
+				desc,target, _ := WormCategoryDesc(href)
 				result.Desc = desc
+				result.Target = target
 			}
 			result.Category = category.name
-
 			Jobs <- result
 
 		})
@@ -147,17 +222,16 @@ func WormJob(category Category, done chan<- bool) error {
 		response, err := MoreWormJob(category, offset)
 		if err != nil {
 			fmt.Println(err)
-			break;
+			break
 		}
 
 		if response <= 0 {
-			break;
+			break
 		}
 
 		offset += response
 	}
 	fmt.Println(category.name, "请求更多数据条数： ", offset)
-
 
 	return nil
 }
@@ -197,8 +271,8 @@ func MoreWormJob(category Category, offset int) (int, error) {
 		if err != nil {
 			return 0, fmt.Errorf("更多doc", err)
 		}
-		doc.Find("div.item").Each(func(i int,s *goquery.Selection) {
-			s.Children().Each(func(j int,ss *goquery.Selection) {
+		doc.Find("div.item").Each(func(i int, s *goquery.Selection) {
+			s.Children().Each(func(j int, ss *goquery.Selection) {
 				result := TagResult{}
 
 				imgUrl, ok := ss.Find("img").Attr("src")
@@ -213,11 +287,13 @@ func MoreWormJob(category Category, offset int) (int, error) {
 					result.Title = title
 				}
 
-				desc := ss.Find("p").Text()
-				if len(desc) > 0 {
-					//fmt.Println("desc=", desc)
+				href, ok := ss.Find("a").Attr("href")
+				if ok {
+					desc, target, _ := WormCategoryDesc(href)
 					result.Desc = desc
+					result.Target = target
 				}
+
 				result.Category = category.name
 
 				Jobs <- result
@@ -244,9 +320,9 @@ func main() {
 		return
 	}
 	defer body.Close()
-/*	bodyByte, _ := ioutil.ReadAll(body)
-	resStr := string(bodyByte)
-	fmt.Println(resStr)*/
+	/*	bodyByte, _ := ioutil.ReadAll(body)
+		resStr := string(bodyByte)
+		fmt.Println(resStr)*/
 
 	Jobs = make(chan TagResult, 20000)
 
@@ -257,9 +333,9 @@ func main() {
 	}
 
 	var bigCategory []Category
-	doc.Find("ul.zm-topic-cat-main").Each(func(i int,s *goquery.Selection) { //获取节点集合并遍历
-		s.Children().Each(func(j int,ss *goquery.Selection) {
-			category,_ := ss.Find("a").Attr("href")
+	doc.Find("ul.zm-topic-cat-main").Each(func(i int, s *goquery.Selection) { //获取节点集合并遍历
+		s.Children().Each(func(j int, ss *goquery.Selection) {
+			category, _ := ss.Find("a").Attr("href")
 			categorys := strings.Split(category, " ")
 
 			topic, _ := ss.Attr("data-id")
@@ -270,14 +346,18 @@ func main() {
 
 	//fmt.Println(bigCategory)
 	if len(bigCategory) <= 0 {
-		log.Println("没有爬到数据");
-		return;
+		log.Println("没有爬到数据")
+		return
 	}
+	fmt.Println("有", len(bigCategory), "个分类")
 
 	done = make(chan bool, len(bigCategory))
 	//循环大分类
-	for _, t := range bigCategory {
+	for index, t := range bigCategory {
 		go WormJob(t, done)
+		if (index > 1) {
+			break;
+		}
 	}
 
 	//等待所有的工作做完
@@ -291,17 +371,18 @@ func main() {
 	//处理工作
 	//计数器
 	count := 1
-	fileName := "category.toml"
+	fileName := "category4.txt"
 	os.Remove(fileName)
-	file, err := os.OpenFile(fileName, os.O_WRONLY | os.O_CREATE | os.O_APPEND, 0644)
+	file, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		fmt.Println(err)
 	}
 	defer file.Close()
 
 	for result := range Jobs {
-		fmt.Printf("============%d================\n",count)
+		fmt.Printf("============%d================\n", count)
 		fmt.Println("category=", result.Category)
+		fmt.Println("target=", result.Target)
 		fmt.Println("img_url=", result.ImgUrl)
 		fmt.Println("title=", result.Title)
 		fmt.Println("desc=", result.Desc)
@@ -309,7 +390,11 @@ func main() {
 		count += 1
 
 		//写入文件
-		if _, err := file.Write([]byte("category=" + result.Category+"\r\n")); err != nil {
+		if _, err := file.Write([]byte("category=" + result.Category + "\r\n")); err != nil {
+			fmt.Println(err)
+		}
+
+		if _, err := file.Write([]byte("target=" + result.Target + "\r\n")); err != nil {
 			fmt.Println(err)
 		}
 
@@ -325,11 +410,9 @@ func main() {
 			fmt.Println(err)
 		}
 
-
 	}
 
-
-
+	fmt.Println("有", len(bigCategory), "个分类")
 	log.Println("处理完成")
 
 }
