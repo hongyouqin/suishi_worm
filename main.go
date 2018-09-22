@@ -175,7 +175,8 @@ func WormJob(category Category, done chan<- bool) error {
 	}()
 
 	fmt.Println("处理", category, "分类")
-	urlCategory := url + category.name
+
+	/*urlCategory := url + category.name
 	body, err := Worm(urlCategory)
 	if err != nil {
 		return err
@@ -211,10 +212,11 @@ func WormJob(category Category, done chan<- bool) error {
 				result.Target = target
 			}
 			result.Category = category.name
-			Jobs <- result
+			fmt.Println(result)
+			//Jobs <- result
 
 		})
-	})
+	})*/
 
 	//请求"更多"里面的数据
 	offset := 0
@@ -353,11 +355,9 @@ func main() {
 
 	done = make(chan bool, len(bigCategory))
 	//循环大分类
-	for index, t := range bigCategory {
+	for _, t := range bigCategory {
 		go WormJob(t, done)
-		if (index > 1) {
-			break;
-		}
+
 	}
 
 	//等待所有的工作做完
@@ -371,7 +371,7 @@ func main() {
 	//处理工作
 	//计数器
 	count := 1
-	fileName := "category4.txt"
+	fileName := "category.txt"
 	os.Remove(fileName)
 	file, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
